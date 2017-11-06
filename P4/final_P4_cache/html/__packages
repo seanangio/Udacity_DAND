@@ -1,0 +1,10 @@
+base
+ggplot2
+MASS
+tidyr
+stringr
+dplyr
+knitr
+gridExtra
+scales
+bindrcpp

@@ -1,0 +1,1500 @@
+---
+title: "Investigating 2016 PA Presidential Election Contributions"
+date: "April 13, 2017"
+output:
+  html_document:
+    keep_md: yes
+    number_sections: yes
+    theme: united
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# load all packages in this chunk
+library(ggplot2)
+library(MASS)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(knitr)
+library(gridExtra)
+library(grid)
+library(scales)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+# Importing the Data
+
+I examined the 2016 Presidential Campaign Finance contributor report for the state of Pennsylvania, as provided by the Federal Election Commission (FEC). It can be found [here](http://fec.gov/disclosurep/PDownload.do). 
+
+I wanted to investigate Pennsylvania data because it is my home state and a key swing state.
+
+```{r echo=FALSE, Load_the_Data}
+# load the data
+if (!file.exists("P00000001-PA.csv")) {
+    url <- "ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001-PA.zip"
+    download.file(url, dest = "P00000001-PA.csv", mode = "wb") 
+}
+
+# row.names = NULL because cmte_id taken
+pcf <- read.csv('P00000001-PA.csv', row.names = NULL)
+
+# shift column titles correctly
+names(pcf) <- c("cmte_id", "cand_id", "cand_nm", "contbr_nm", "contbr_city", "contbr_st", "contbr_zip", "contbr_employer", "contbr_occupation","contb_receipt_amt", "contb_receipt_dt", "receipt_desc", "memo_cd", "memo_text", "form_tp", "file_num", "tran_id", "election_tp")
+
+# delete last empty column after the shift
+pcf[19] <- NULL
+```
+
+Note: I used row.names = NULL because it was reading in `cmte_id` as the row but it creates an error because of the duplicates. I thought `tran_id` could serve as the row but this too has a few duplicates.
+
+```{r include=FALSE, non_unique_tran_id}
+# if all unique, would be 0
+non_unique_tran_id <- nrow(pcf) - length(unique(pcf$tran_id))
+non_unique_tran_id
+```
+
+## Viewing the Initial Dataset
+
+After loading the data, I want to take a first look with str, summary, and View functions.
+
+```{r echo=FALSE, str_data}
+# structure of the dataset
+str(pcf)
+```
+
+```{r echo=FALSE, summary_data}
+# summary of dataset
+summary(pcf)
+```
+
+## Initial thoughts on the variables:
+
+* I see that `cand_id` and `cand_nm` are both factors with 24 levels. That makes me think it is likely no errors are there.
+
+* 56881 `contb_nm` out of 243796 observations. That means a lot of repeat donors.
+
+* `contbr_st` is all PA as it should be.
+
+* `contbr_zip` has a mix of 5 digit and 9 digit zip codes. A min value of 0 is a flag for at least some errors.
+
+* `contb_receipt_amt`: many negative values surprisingly
+
+* `contb_receipt_dt`: need to convert to date format
+
+* `tran_id`: not entirely unique as I would expect so not an index
+
+* `election_tp`: already see a likely error 'G2106'; shouldn't have 6 levels
+
+* I can probably drop the following variables: `cmte_id`, `cand_id`, `contbr_city`, `contbr_st`, `contbr_employer`, `contbr_occupation`, `form_tp`, `file_num`, `tran_id`
+
+* Interestingly, missing any party affiliation data. It should be created.
+
+* `contb_receipt_amt` is the only legitimate numeric variable. This means I won't be able to do analysis that requires at least two numeric variables, such as correlation.
+
+# Data Wrangling
+
+## Investigating election_tp
+
+I decided to first take care of a few small problems in election type on seeing levels of "O2016", "P2020", and "G2016".
+
+```{r, echo=FALSE, election_tp}
+# frequency of election type variable
+unique(pcf$election_tp)
+
+cbind(freq = table(pcf$election_tp))
+```
+
+* G2106 and P2020 must be simple errors. 
+
+* 'O2016' is 'Other 2016'. All of these donations seem to be for Jill Stein's recount effort after the November General election. We should exclude this data because I'm interested in how fundraising impacted the outcome of the election.
+
+* Not clear why 452 are blank at the moment. No obvious pattern. Maybe just didn't specify when making the donation.
+
+```{r echo=FALSE}
+# remove 'O2016' from dataframe
+pcf1 <- droplevels(subset(pcf, election_tp != 'O2016'))
+```
+
+```{r echo=FALSE}
+# correct error in election_tp
+pcf1 <- pcf1 %>%
+  mutate(election_tp = replace(election_tp, election_tp == "P2020", "P2016")) %>%
+  as.data.frame()
+```
+
+```{r echo=FALSE}
+# correct error in election_tp
+pcf1 <- pcf1 %>%
+  mutate(election_tp = replace(election_tp, election_tp == "G2106", "G2016")) %>%
+  as.data.frame()
+```
+
+```{r echo=FALSE}
+# remove null factors
+pcf1$election_tp <- factor(pcf1$election_tp)
+```
+
+After data wrangling I can see that "O2016", "P2020", and "G2016" have been removed. I will leave the 452 blank alone for now. Most seem to go to R's.
+
+```{r, echo=FALSE, election_tp_freq}
+# frequency of election type
+cbind(freq = table(pcf1$election_tp))
+```
+
+```{r, echo=FALSE, election_tp_blank}
+# dataframe of election_tp blank
+blank <- subset(pcf1, pcf1$election_tp == "")
+```
+
+## Investigating contb_receipt_amt
+
+I started investigating `contb_receipt_amt` by plotting it against date. I was surprised to see one extremely negative value but also a very large number of negative values.
+
+```{r echo=FALSE, first_plot}
+# quick dirty plot of contribution amount vs date
+ggplot(pcf1, aes(x = contb_receipt_dt, y = contb_receipt_amt)) + geom_point()
+```
+
+```{r echo=FALSE, smallest_donation}
+# minimum contribution
+smallest_donation <- pcf1[pcf1$contb_receipt_amt == min(pcf1$contb_receipt_amt),]
+smallest_donation
+```
+
+The minimum contribution was a stunning -$93,308, which doesn't make much sense. I note though it is marked as 'Refund'.
+
+```{r echo=FALSE, pos_nonpos}
+# freq and relfreq of non-positive contributions
+cbind(freq = (table(pcf1$contb_receipt_amt <= 0)), (format(cbind(relfreq = table(pcf1$contb_receipt_amt <= 0)) / nrow(pcf1), digits = 2, scientific = FALSE)))
+```
+
+There are 2,768 non-positive contributions. As a percentage of the total observations, this is very small, but it's still important to look at. 
+
+```{r non_positive_donations, echo=FALSE}
+# dataframe of non-positive donations
+non_positive_donations <- subset(pcf1, pcf1$contb_receipt_amt <= 0)
+#View(non_positive_donations)
+```
+
+Looking at a subset of negative donations, we can see that many are marked as refunds, some are reattributed to others, others have no explanation.
+
+How to handle non-positive values? I thought of trying to match up negative refunds with positive donations. Because if someone donated money, and then was refunded, should that donation not be counted at all?
+
+This wouldn't be easy though because there's no guarantee of positive and negative donations matching up. Perhaps more problematic is that some names don't exactly match up, e.g. 'FOLINO, J.A.' was refunded 8100 but there is a donation from 'FOLINO, J. A.' and 'FOLINO, JOHN' (all from same zip code) for 10800 and 2700, respectively. 
+
+```{r include=FALSE, santana_lucy}
+# eg of a donor having positive and negative contributions
+santana_lucy <- subset(pcf1, pcf1$contbr_nm == 'SANTANA, LUCY')
+santana_lucy
+```
+
+For the sake of simplicity, I decided to remove all non-positive donations from consideration. I'd be glad to know how other people handled this problem.
+
+```{r, echo=FALSE, positive_donations}
+# updted dataframe with non-positive contribtions removed
+pcf2 <- subset(pcf1, pcf1$contb_receipt_amt > 0)
+```
+
+I should also look at outlier values for this variable but will first look at other variables.
+
+## Investigating contb_receipt_dt
+
+Next I want to investigate the date of contributions. First I need to convert them from factors to Date format.
+
+```{r, include=FALSE, contb_receipt_dt_data_type}
+# fix data type of cont_receipt_dt
+pcf2$contb_receipt_dt <- as.Date(pcf2$contb_receipt_dt, format = '%d-%b-%y')
+# confirming class
+class(pcf2$contb_receipt_dt)
+```
+
+```{r late_contributions}
+# contributions after election date (2016-11-08)
+late <- subset(pcf2, pcf2$contb_receipt_dt > '2016-11-08')
+```
+
+I want to exclude the 1314 positive contributions (mostly for Trump) that came in after the date of the election because I am interested in contributions that influenced the outcome of the election.
+
+```{r only_positive_contributions}
+# updated dataframe with only positive contributions on/before election date
+pcf3 <- subset(pcf2, pcf2$contb_receipt_dt <= '2016-11-08')
+```
+
+## Investigating cand_nm
+
+Next I took a look at candidates to ensure there is no duplication or other errors.
+
+```{r echo=FALSE, unique_candidates}
+# we see 24 unique candidates
+unique(pcf3$cand_nm)
+```
+
+## Investigating contbr_zip
+
+`contbr_zip` data include some 5 digit and some 9 digit zip codes. I broke these into separate columns so, if desired, I could do analysis by zip code and add a geographic component to the analysis.
+
+```{r zip_update}
+# split zip code into digits 1-5 and extra digits 6-9
+pcf4 <- separate(pcf3, contbr_zip, c("contbr_zip5", "zip_extra"), sep = 5)
+```
+
+If you sort this list and then look at the head or the tail, you'll see errors. Quite a few are given as 99999, others a single digit, others another state. However since all states are listed as PA, I chose not to exclude them. These are probably simple errors or perhaps people who live in two states.
+
+## Investigating receipt description
+
+`receipt_desc`, `memo_cd`, and `memo_text` are there variables that are not particularly well explained. I get the sense perhaps not all but many of them are contributions flagged for refund. If that is the case, we should not consider them because such a contribution would not have been used. While there are a number of different descriptions, I think it is safer to exclude all such contributions from analysis.
+
+```{r blank_receipts}
+# data with only blank receipt descriptions
+pcf5 <- subset(pcf4, pcf4$receipt_desc == "")
+```
+
+This action removed 622 observations. Given we removed 2,768 non-positive contributions earlier, this seems to be a conservative action.
+
+## Investigating memo text
+
+Scrolling through the memo text column, I can see that sometimes it notes a refund needs to be given. Often it is not for the full amount donated. For simplicity, anytime refund is mentioned, I will remove the entire observation, regardless of the amount noted. 
+
+```{r blank_memos}
+# 59 observations still mention refund in memo_text
+table(str_detect(as.character(pcf5$memo_text), "REFUND"))
+```
+
+```{r blank_memos_removed}
+# new dataframe with memo_text refunds removed
+memo_refund <- str_detect(as.character(pcf5$memo_text), "REFUND")
+pcf6 <- subset(pcf5, memo_refund == FALSE)
+```
+
+## Dump variables not to be used
+
+Coming to the end of data wrangling, I want to remove columns I don't plan to analyse.
+
+```{r remove_variables}
+# remove unneeded columns
+pcf7 <- subset(pcf6, select = -c(cmte_id, cand_id,     
+                                 contbr_city, contbr_st, 
+                                 contbr_employer, 
+                                 contbr_occupation, form_tp, 
+                                 file_num, tran_id, zip_extra))
+
+```
+
+## Adding party affiliation
+
+Below is a rather dirty way to add party affiliations to each candidate. I'm sure there is a cleaner way. But it worked.
+
+```{r add_party}
+# add a new empty column
+pcf7[ , "party"] <- ""
+
+# assign parties
+pcf7$party <- ifelse(pcf7$cand_nm == "Johnson, Gary", "I",
+                     ifelse(pcf7$cand_nm == "Stein, Jill", "G",
+                            ifelse(pcf7$cand_nm == "Webb, James Henry Jr.", "D",
+                                  ifelse(pcf7$cand_nm == "Lessig, Lawrence", "D",
+                                        ifelse(pcf7$cand_nm == "O'Malley, Martin Joseph", "D",
+                                              ifelse(pcf7$cand_nm == "Sanders, Bernard", "D",
+                                                     ifelse(pcf7$cand_nm == "Clinton, Hillary Rodham", "D", "R"
+                                   )))))))
+
+```
+
+```{r party_factor}
+# make party a factor variable
+pcf7$party <- as.factor(pcf7$party)
+class(pcf7$party)
+```
+
+## Outliers
+
+I took a last look at the highest contributions. One value in particular was more than 2x the next highest value. For that reason, and because it went to a candidate who dropped out early, I decided to exclude from consideration the $10,800 contribution to Scott Walker. It seems likely that even if the candidate received this money, at least part of it would need to be marked for a refund due to FEC rules. So I'd say it was bad data about an extreme case.
+
+I'm suspicious of the values over \$5000, which I believe is the maximum in most cases. However no such contribution goes to Clinton or Trump, where most of my analysis is focused. For these values, perhaps party of the contribution in excess of $5000 was refunded but it is difficult to know. So I think it's ok to leave them.
+
+```{r remove_outlier}
+# remove an outlier
+pcf8 <- subset(pcf7, pcf7$contb_receipt_amt != 10800)
+```
+
+## Assign blank election_tp
+
+My last step in data wrangling will be to assign observations with empty election_tp values. This is true for 292 entries. I only care about the one marked for Trump, and so I can set all of them for "G2016" based on their date.
+
+```{r echo=FALSE}
+pcf8[pcf8$election_tp == "", "election_tp" ] = "G2016"
+```
+
+```{r echo=FALSE}
+pcf8$election_tp <- factor(pcf8$election_tp)
+```
+
+```{r echo=FALSE}
+# updated frequency of election type
+cbind(freq = table(pcf8$election_tp))
+```
+
+## Initial questions about the data
+
+* Describe how candidates received financial contributions over the course of the campaign.
+
+* What can we say about the nature of contributions received by the top candidates? For example, how does a typical Clinton contribution compare to a typical Sanders contribution?
+
+* What trends are discernible amongst party lines? How do contributions for Democratic candidates compare to those for Repubicans?
+
+* In what way did contributions for the 2016 primary differ from the 2016 general election?
+
+* Knowing the broad outcome of the election, what can we say about the role of financial contributions?
+
+# Univariate Plots Section
+
+## Investigating contb_receipt_amt
+
+The most important (and only numeric) variable is the financial value of a contribution. 
+
+```{r summary_contb_receipt_amt}
+# summary of contb_receipt_amt
+summary(pcf8$contb_receipt_amt)
+```
+
+We can get more details from the table below.
+
+```{r echo=FALSE}
+# mode function from stack overflow
+Mode <- function(x) {
+  ux <- unique(x)
+  if (!anyDuplicated(x)) {
+      NA_character_ } else { 
+     tbl <-   tabulate(match(x, ux))
+     toString(ux[tbl == max(tbl)])
+ }
+}
+```
+
+```{r echo=FALSE, pcf_agg_table}
+# make sure dataframe is also a tibble
+pcf8 <- tbl_df(pcf8)
+
+# aggregate summary data of candidates as a whole
+pcf_agg <- (pcf8 %>%
+  summarise(sum = sum(contb_receipt_amt),
+            n_contributions = n(),
+            n_contributors = n_distinct(contbr_nm),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            sd_contb = sd(contb_receipt_amt),
+            iqr_contb = IQR(contb_receipt_amt),
+            range_contb = max_contb - min_contb,
+            mode_contb = Mode(contb_receipt_amt)) %>%
+  arrange(desc(sum)))
+pcf_agg
+```
+
+From looking at the data, and seeing the mean and median, I expect the data will be heavily right skewed-- mostly small donations but large outliers. I'll make a histogram to see this.
+
+```{r echo=FALSE, first_histogram}
+# initial histogram with ggplot2
+ggplot(pcf8, aes(x = contb_receipt_amt)) +
+  geom_histogram()
+```
+
+Even having removed one very extreme value, we still have a very long tail (most people contributing small amounts, but a few donating very high (e.g. $5000)). I'll start to zoom in. Because people will likely donate round amounts, I'll also set the binwidth argument to 1.
+
+```{r echo=FALSE, hist_2}
+# histogram with contributions +$1000 removed and binwidth = 1
+ggplot(pcf8, aes(x = contb_receipt_amt)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(limits = c(0,1000))
+```
+
+Removing any contribution above $1000 excludes 3279 contributions. This amounts to 1.3% of our dataset under consideration. We still get a very long tail. But setting binwidth equal to 1 really helps give a clearer picture of how people contributed. I'll zoom in on the smaller donations.
+
+```{r echo=FALSE, hist_3}
+# histogram with contributions +$501 removed and binwidth = 1
+ggplot(pcf8, aes(x = contb_receipt_amt)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(limits = c(0,501), 
+                     breaks = seq(0, 501, 50)) +
+  xlab("Contribution ($)")
+```
+
+Setting our xlim to \$500 gave us a better picture. The most common contribution is \$25, followed by \$50, \$100, \$10. We can still see spikes or modes at \$200, \$250, and $500.
+
+Being a bit more precise, I can remove the top 5% of contb_receipt_amt values.
+
+```{r echo=FALSE, hist_4}
+# histogram with top 5% contributions removed and binwidth = 1
+ggplot(pcf8, aes(x = contb_receipt_amt)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(limits = 
+                       c(0,quantile(pcf8$contb_receipt_amt, 
+                                    0.95)))
+```
+
+I can manipulate the x scale to examine how it impacts the visualization. Putting the x axis in log 10 scale gives us something closer to a normal distribution.
+
+```{r echo=FALSE, hist_log}
+# histogram with log10 x scale
+ggplot(pcf8, aes(x = contb_receipt_amt)) +
+  geom_histogram() +
+  scale_x_log10()
+```
+
+We can also try a boxplot of the same data.
+
+```{r echo=FALSE, box1}
+# boxplot of contb_receipt_amt
+boxplot(pcf8$contb_receipt_amt, horizontal = TRUE)
+```
+
+We can do the same with ggplot.
+
+```{r box_gg, echo = FALSE}
+# boxplot of contb_receipt_amt
+ggplot(pcf8, aes(x = 1, y = contb_receipt_amt)) +
+  geom_boxplot() + 
+  coord_flip()
+```
+
+The presence of outliers makes the boxplot less useful without zooming in. We'll return to it when we compare distributions of parties or candidates, which is what the boxplot is better suited for.
+
+## Investigating contb_receipt_dt
+
+The variable date of contribution can also gives us some idea of the course of the campaign over time.
+
+```{r first_contribution}
+# first contribution
+first_contribution <- min(pcf8$contb_receipt_dt)
+first_contribution
+```
+
+```{r campaign_duration}
+# duration of campaign 
+campaign_duration <- max(pcf8$contb_receipt_dt) - min(pcf8$contb_receipt_dt)
+campaign_duration
+```
+
+```{r hist_date_1, echo = FALSE}
+# first histogram of contb_receipt_dt
+ggplot(pcf8, aes(x = contb_receipt_dt)) +
+  geom_histogram()
+```
+
+We see that while the first contribution was received in July 17, 2014, the bulk of contributions do not begin until much later. We can get a better picture by beginning on 1 July 2015.
+
+```{r date_hist_2, echo=FALSE}
+# improved histogram cutting out early dates
+ggplot(pcf8, aes(x = contb_receipt_dt)) +
+  geom_histogram() +
+  scale_x_date(labels = date_format("%Y-%m-%d"),
+               limits = c(as.Date("2015-07-01"), 
+                          as.Date("2016-11-08")))
+```
+
+A density plot smoothes this out, showing 3 modes.
+
+```{r date_density, echo=FALSE}
+ggplot(pcf8, aes(x = contb_receipt_dt)) +
+  geom_density() +
+  scale_x_date(labels = date_format("%Y-%m-%d"),
+               limits = c(as.Date("2015-07-01"), 
+                          as.Date("2016-11-08")))
+```
+
+But it is probably more complicated than that as we see with binwidth = 1.
+
+```{r echo=FALSE, date_hist_3}
+# set binwidth = 1
+ggplot(pcf8, aes(x = contb_receipt_dt)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_date(labels = date_format("%Y-%m-%d"),
+    limits = c(as.Date("2015-07-01"), as.Date("2016-11-08")))
+```
+
+The previous histogram and density plots had a few humps but you could mistake it for a steady increase in the frequency of donations. However, setting binwidth = 1 you see a more nuanced picture. The two most popular days for donations are much further out from the end of the campaign. Overall, more contributions were taken at the end, but it's interesting to see how much it varies day to day. 
+
+NB: These are just counts of contributions made and not their financial value. E.g. a $1 and $100 donation are recorded similarly.
+
+## Investigating contbr_nm
+
+Do most people that give usually just give once? Or do they donate repeatedly? The output below doesn't tell us anything about the amounts donated, but at least a handful of people donated repeatedly.
+
+```{r most_frequent_contributors, echo=FALSE}
+# most frequent contributors
+head(cbind(freq = sort(table(pcf8$contbr_nm), decreasing = TRUE)), n = 20)
+```
+
+The histogram though shows us this is unusual behavior. 
+
+```{r echo = FALSE, hist_contbr_freq}
+# histogram of frequency of donor contribution
+hist(table(pcf8$contbr_nm), breaks = 150)
+```
+
+And now zooming in...
+
+```{r hist_contbr_freq_2}
+# histogram of frequency of donor contribution (zoomed in)
+hist(table(pcf8$contbr_nm), 
+     xlim = c(0, 50), 
+     breaks = seq(0, 200, 1))
+```
+
+In fact, while the median frequency contribution is 1, outliers stretch the mean to 4.20. The mode of course is also 1.
+
+```{r include=FALSE, median_mean_contribution_frequency}
+# median and mean contribution frequency
+print(median(table(pcf8$contbr_nm)))
+print(mean(table(pcf8$contbr_nm)))
+print(Mode(table(pcf8$contbr_nm)))
+```
+
+## Investigating election_tp
+
+The dataset marks contributions designated for the primary and those for the general election.
+
+```{r echo=FALSE, election_tp_freq_2}
+# freq and relfreq of election type
+cbind(freq = (table(pcf8$election_tp)), (format(cbind(relfreq = table(pcf8$election_tp)) / nrow(pcf8), digits = 2, scientific = FALSE)))
+```
+
+In the bar chart below, it is interesting to note that more contributions were marked for the primary than the general. Perhaps this is because there are more candidates in the primary stage. The primary though, in terms of time, is much longer than the general.
+
+```{r election_tp_bar, echo=FALSE}
+# bar chart of election type
+ggplot(subset(pcf8, !pcf8$election_tp == ""), 
+       aes(x = election_tp)) +
+       geom_bar(position = "dodge")
+```
+
+## Investigating party
+
+If we want a shorter summary than looking at 24 candidates, we can look at frequency of the party variables.  
+
+```{r echo=FALSE, party_freq}
+# frequency and relfreq of contributions by zip code (top)
+cbind(freq = (sort(table(pcf8$party), decreasing = TRUE)), (format(cbind(relfreq = sort(table(pcf8$party), decreasing = TRUE)) / nrow(pcf8), digits = 1, scientific = FALSE)))
+```
+
+Nearly 75% of number of contributions (not value) were slated for Democratic candidates, 25% for Republican, and less than 1% for Green or Independent candidates.
+
+For my future visualizations, I'll often only be concerned about Democrats and Republicans because the totals for Greens and Independents are so small. Therefore, I subsetted this data into a new dataframe and assigned the associated colors.
+
+```{r echo=FALSE, dr_data}
+# dataframe of only Democrats and Republicans
+pcf_dr <- subset(pcf8, pcf8$party == "D" | pcf8$party == "R")
+```
+
+```{r echo=FALSE, party_color_vector}
+# set party color vector
+party_colors <- c("D" = "blue", "R" = "red", "G" = "green", "I" = "purple")
+```
+
+You can see the disparity in the bar chart comparing Democrats and Republicans.
+
+```{r echo=FALSE, bar_party_freq}
+# bar chart of number of contributions by major party
+ggplot(pcf_dr, aes(x = party, fill = party)) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = party_colors)
+```
+
+## Investigating zipcode
+
+I didn't heavily dig too heavily zip code data. But just looking at frequency here, even the zip code with the most contributions only amounts to 1.55% of the total. The top few are all in Philadelphia or Pittsburgh. I was surprised to see my own zip code rank 17th! 
+
+```{r echo=FALSE, zip_head}
+# frequency and relfreq of contributions by zip code (top)
+head(cbind(freq = (sort(table(pcf8$contbr_zip5), decreasing = TRUE)), (format(cbind(relfreq = sort(table(pcf8$contbr_zip5), decreasing = TRUE)) / nrow(pcf8), digits = 1, scientific = FALSE))), n = 20)
+```
+
+It will be more interesting to see if this changes when you consider financial contribution instead of frequency. Because zip codes are so small, it would also be better to try to geographically map the data.
+
+```{r echo=FALSE, zip_tail}
+# frequency and relfreq of contributions by zip code (bottom)
+head(cbind(freq = (sort(table(pcf8$contbr_zip5), decreasing = FALSE)), (format(cbind(relfreq = sort(table(pcf8$contbr_zip5), decreasing = TRUE)) / nrow(pcf8), digits = 1, scientific = FALSE))), n = 20)
+```
+
+Looking at the head and tails of the sorted list, in addition to showing the errors discussed in the data wrangling section, also shows that some valid PA zip codes give only 1 contribution. Seeing that 3,719 contributions came from center city Philadelphia and only 1 contribution came from a zip in Virginville is not surprising but still interesting. Of course, zip codes are not evenly distributed by population by any means.
+
+# Univariate Analysis
+
+**Key Summary:**
+From July 7, 2014 to Nov 8, 2016, 24 candidates received a total of $25,310,396 over 238,989 valid donations from 55,497 unique contributors in the state of Pennsylvania.
+
+* Minimum non-negative contribution: $0.05
+
+* 25% quantile: $15
+
+* Median contribution: $28
+
+* Mean contribution: $105.91
+
+* 75% quantile: $80
+
+* Maximum contribution: $5,400
+
+* Range: 5399.95
+
+* IQR: 65
+
+* Standard Deviation: 319.89
+
+
+Given the heavy right skew, the median and IQR are more useful than the mean and standard deviation when describing the data.
+
+The difference between the first campaign contribution and the date of the election is 845 days-- well over 2 years. But looking at the histogram we can see most contributions do not really start to come in until 2015 and really pick up in 2016. The greatest single window for contributions, as one might expect, was very close to the election date itself, but there is a large day to day fluctuation.
+
+Most of the 55,497 unique contributors made their donation only once. 1 is in fact the median donation frequency. However, this data is long-tailed with a small people donating more than 100 times.
+
+Nearly 75% of valid contributions received went to Democratic candidates; 25% went to Republicans; and a small fraction of 1 percent went to Independent or Green Party candidates.
+
+As we can expect, it's clear that contributions vary considerably by zip code, with some urban commerce centers donating 1000s of times more than sparsely populated rural areas.
+
+We'll have to do further bivariate and multivariate analysis however to be able to attach more meaning to this data.
+
+### What is the structure of the dataset?
+
+Beginning with 243,796 observations of 18 variables in the original dataset, I chose to analyse 238,989 observations of 10 variables after removing contributions after the date of the election, non-positive contributions, contributions marked for refund/reassignment etc, and unnecessary variables, adding the party variable, and removing an outlier.
+
+### What is/are the main feature(s) of interest in the database?
+
+The main features of interest are the contribution amount received by each candidate over the course of the campaign. We want to analyze the nature of contributions and how they might differ depending on the candidate, party, or time period in the campaign.
+
+### What other features will help support your investigation into your feature of interest?
+
+The key for bivariate and multivariate sections will be to group data by candidates and party. That's what is interesting about the data.
+
+### Did you create any new variables from existing variables in the dataset?
+
+I created a party affiliation variable because that is also an important factor one would expect that would drive donations. For example, as candidates of one party drop out, we might expect more contributions to go to candidates of the same party. It can reveal the relative strength/weakness of the party institutions in the state.
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+The data did need some cleaning. In particular I chose to remove non-positive contributions for reasons discussed above. I chose to remove contributions after the date of the election as they could not have impacted the outcome of the election. I also removed donations flagged with some kind of memo, including refunds. I separated zip code data so all had a 5 digit code. I ensured all contributions were either for the 2016 primary or 2016 general election. I removed one very extreme value because it was likely refunded at least partially.
+
+# Bivariate Plots Section
+
+Rather than looking at the dataset as a whole, what's more interesting is to group the data by variables such as party and candidate.
+
+## Investigating contb_receipt_amt by party
+
+We can group candidates by party and get a more meaningful summary than our aggregate data.
+
+So which party raised the most money?
+
+```{r echo=FALSE, contb_by_party}
+# sum of contributions by party
+cbind(by(pcf8$contb_receipt_amt, pcf8$party, sum))
+```
+
+Democratic candidates received \$15.6m in contributions; Republican candidates received \$9.6m; Green candidates received \$25k and Independents $93k. The bar chart shows the large fundraising advantage of Democrats over Republicans.
+
+```{r dr_amt_bar, echo= FALSE}
+# bar chart of value of contributions received by party
+dr_sum <- ggplot(pcf_dr, aes(x = party, 
+                             y = contb_receipt_amt,
+                             fill = party)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = party_colors)
+dr_sum
+```
+
+Democratic candidates received over $6m more than the field of Republican candidates.
+
+```{r include=FALSE, dem_advantage}
+# difference in funds between D's and R's
+dems <- filter(pcf_dr, pcf_dr$party == "D")
+repubs <- filter(pcf_dr, pcf_dr$party == "R")
+dem_advantage <- sum(dems$contb_receipt_amt) - sum(repubs$contb_receipt_amt)
+dem_advantage
+```
+
+We can get a more detailed look at the distribution of funding per party with the summary function and our own table.
+
+```{r summary_contb_receipt_amt_party, echo = FALSE}
+# summary of contb_receipt_amt by party
+by(pcf8$contb_receipt_amt, pcf8$party, summary)
+```
+
+```{r party_table, echo=FALSE}
+# group by party
+pcf_party <- (pcf8 %>%
+  group_by(party) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            p_sum = sum / sum(pcf8$contb_receipt_amt),
+            n_contributions = n(),
+            p_contributions = n_contributions / nrow(pcf8),
+            n_contributors = n_distinct(contbr_nm),
+            p_contributors = n_contributors /           
+              length(unique(pcf8$contbr_nm)),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            sd_contb = sd(contb_receipt_amt),
+            iqr_contb = IQR(contb_receipt_amt),
+            range_contb = max_contb - min_contb,
+            mode_contb = Mode(contb_receipt_amt)) %>%
+            mutate(rank_sum = rank(sum),
+                   rank_contributors = rank(n_contributors),
+                   rank_contributions = rank(n_contributions)) %>%
+  arrange(desc(sum)))
+
+pcf_party
+```
+
+We can return to our earlier histogram but fill by party.
+
+```{r hist_party_fill, echo=FALSE}
+# histogram with contributions +$501 removed and binwidth = 1
+ggplot(pcf_dr, aes(x = contb_receipt_amt, 
+                   fill = party)) +
+  geom_histogram(binwidth = 1, 
+                 position = "dodge") +
+  scale_x_continuous(limits = c(0,201), 
+                     breaks = seq(0, 201, 50)) +
+  xlab("Contribution ($)") +
+  scale_fill_manual(values = party_colors)
+```
+
+We can see that at almost every value, the value of contributions received by Democratic candidates far outweighs that received by Republicans.
+
+```{r dr_boxplot, echo=FALSE}
+# boxplot comparing Democrat and Repbulican contributions
+ggplot(pcf_dr, aes(x = party, 
+                   y = contb_receipt_amt)) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0,150))
+```
+
+Although it is necessary to remove many of the outliers for both parties, this zoomed in view shows larger 25%, 50%, and 75% values for Republicans than Democrats, suggesting that Republicans tend to make larger donations.
+
+A similar view can be achieved in a density plot.
+
+```{r dr_density, echo=FALSE}
+# Create overlaid density plots for same data
+ggplot(pcf_dr, aes(x = contb_receipt_amt, 
+                   fill = party)) +
+  geom_density(alpha = .3) +
+  coord_cartesian(xlim = c(0, 150)) +
+  scale_fill_manual(values = party_colors)
+```
+
+Comparing the results of the party-wise histograms and boxplot is interesting. The boxplot shows that Republicans have a higher 25%, median, and 75% quantile. In fact, the Republican 25% quantile of 25 is the Democratic median; the Republican median is the Democratic 75% quantile; the Republican 75% quantile is 2x the Democratic 75% quantile. 
+
+Although impacted by outliers, from pcf_party, we can see that the Republican mean of \$157.70 was close to 2x the Democratic mean of $87.92.
+
+As the histogram makes very clear, contributions to Democratic candidates, especially at values under $50, are much more numerous.
+
+```{r dr_freq, include=FALSE}
+# difference between number of Dem contb and Repub contb 
+dem_advantage_contb <- nrow(dems) - nrow(repubs)
+dem_advantage_contb
+```
+
+In fact, in frequency, Democrats received 116,883 more contributions than Republicans.
+
+```{r dr_n_contributions_bar, echo=FALSE}
+# barplot of D and R n_contributions
+dr_n_contb <- ggplot(subset(pcf_party, pcf_party$party == "D" |
+                pcf_party$party == "R"), 
+       aes(x = party,
+           y = n_contributions,
+           fill = party)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = party_colors)
+dr_n_contb
+```
+
+However what is really interesting is the number of unique contributions shown in pcf_party.
+
+```{r unique_contb_diff, include=FALSE}
+# difference in unique contributors
+unique_contb_diff <- length(unique(repubs$contbr_nm)) - length(unique(dems$contbr_nm))
+unique_contb_diff
+```
+
+```{r dr_n_contributors_bar, echo=FALSE}
+# barplot of D and R n_contributors
+dr_n_contbr <- ggplot(subset(pcf_party, pcf_party$party == "D" |
+                pcf_party$party == "R"), 
+       aes(x = party,
+           y = n_contributors,
+           fill = party)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = party_colors)
+dr_n_contbr
+```
+
+Despite Democrats raising a total of $6m more money than Republicans, and 116,883 more instances of a contribution, Republican candidates actually received donations from 4,393 more unique contributors.
+
+Thus, the boxplot data showing Democratic contributions are typically smaller (lower quantiles, mean, median, etc) are undercut by the fact that many Democratic contributions are from repeat donors. 
+
+## Investigating contb_receipt_amt by candidate
+
+The party variable is an aggregation of individual candidates. So what we really want to examine is the candidates themselves.
+
+We can get a short summary of each here:
+```{r summary_contb_receipt_amt_cand_nm, echo=FALSE}
+# summary of contb_receipt_amt by cand_nm
+by(pcf8$contb_receipt_amt, pcf8$cand_nm, summary)
+```
+
+Or a more detailed look at each candidate a table we constructed.
+
+```{r cand_table, echo=FALSE}
+# summary stats grouped by candidate
+pcf_cand <- (pcf8 %>%
+  group_by(cand_nm) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            p_sum = sum / sum(pcf8$contb_receipt_amt),
+            n_contributions = n(),
+            p_contributions = n_contributions / nrow(pcf8),
+            n_contributors = n_distinct(contbr_nm),
+            p_contributors = n_contributors /           
+              length(unique(pcf8$contbr_nm)),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            sd_contb = sd(contb_receipt_amt),
+            iqr_contb = IQR(contb_receipt_amt),
+            range_contb = max_contb - min_contb,
+            mode_contb = Mode(contb_receipt_amt)) %>%
+            mutate(rank_sum = rank(sum),
+                   rank_contributors = rank(n_contributors),
+                   rank_contributions = rank(n_contributions)) %>%
+  arrange(desc(sum)))
+
+head(pcf_cand)
+```
+
+We can start to visualize some of the data in a crowded but still telling bar chart, showing Clinton's dominance over the field.
+
+```{r cand_bar, echo=FALSE}
+# barchart of contb_receipt_amt for all candidates
+ggplot(pcf8, aes(x = cand_nm, 
+                 y = contb_receipt_amt, 
+                 fill = party)) +
+    geom_bar(stat = "identity") +
+    scale_y_continuous(labels = comma) + 
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_fill_manual(values = party_colors)
+```
+
+You can see the distribution of contributions for each candidate by comparing boxplots.
+
+```{r cand_box, echo=FALSE}
+# boxplot of all candidates
+ggplot(pcf8, aes(x = cand_nm, y = contb_receipt_amt, fill = party)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  coord_cartesian(ylim = c(0,3000)) +
+  scale_fill_manual(values = party_colors)
+```
+
+Although messy, you can see by comparing the histogram and boxplots the difference between the aggregate totals for each canddiate and the distribution in which it was received. You'll see that for the three largest candidates, their boxplot shows them receiving smaller contributions than many other candidates. There were many Republican candidates who, perhaps had early big corporate donations, but they were not matched by support from enough small donors.
+
+We can narrow our focus to the three largest receipients.
+
+```{r cts_box, echo=FALSE}
+# boxplot of Clinton, Trump, Sanders
+ggplot(subset(pcf8, pcf8$cand_nm == "Clinton, Hillary Rodham" | 
+                pcf8$cand_nm == "Trump, Donald J." | 
+                pcf8$cand_nm == "Sanders, Bernard"), 
+       aes(x = cand_nm, y = contb_receipt_amt)) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0,200))
+```
+
+It would make sense that the story for candidates mirrors that of the party trends. You can see that Clinton received a tremendous amount of contributions compared to other candidates. While gaining more in value and frequency of contributions, Clinton trails Trump in number of unique contributors. Trump also has a higher mean, median, 25% and 75% quantile contribution than Clinton.
+
+As we did for the top two parties, I'll compare the top two candidates with bar plots in terms of sum of contributions received, number of contributions, and number of unique contributors.
+
+```{r pcf_ct}
+# dataframe of only Trump and Clinton
+pcf_ct <- droplevels(subset(pcf8, pcf8$cand_nm == "Clinton, Hillary Rodham" |
+                   pcf8$cand_nm == "Trump, Donald J."))
+```
+
+```{r echo=FALSE, pcf_ct_agg}
+# summary table comparing Trump and Clinton
+pcf_ct_agg <- (pcf_ct %>%
+  group_by(cand_nm) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            p_sum = sum / sum(pcf_ct$contb_receipt_amt),
+            n_contributions = n(),
+            p_contributions = n_contributions / nrow(pcf_ct),
+            n_contributors = n_distinct(contbr_nm),
+            p_contributors = n_contributors /           
+              length(unique(pcf_ct$contbr_nm)),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            sd_contb = sd(contb_receipt_amt),
+            iqr_contb = IQR(contb_receipt_amt),
+            range_contb = max_contb - min_contb,
+            mode_contb = Mode(contb_receipt_amt)) %>%
+            mutate(rank_sum = rank(sum),
+                   rank_contributors = rank(n_contributors),
+                   rank_contributions = rank(n_contributions)) %>%
+  arrange(desc(sum)))
+```
+
+In the plot below you can see that Clinton received nearly \$13m to only a little over $4m for Trump.
+
+```{r echo=FALSE, cand_colors_vector}
+# set candidate colors vector
+cand_colors <- c("Clinton, Hillary Rodham" = "blue", "Trump, Donald J." = "red")
+```
+
+```{r echo=FALSE, ct_sum}
+# clinton v trump contributions sum
+ct_sum <- ggplot(pcf_ct, aes(x = cand_nm, 
+                 y = contb_receipt_amt,
+                 fill = cand_nm)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = cand_colors)
+ct_sum
+```
+
+Clinton received this additional $9m by accumulating 118,000 contributions to only 28,750 for her opponent.
+
+```{r echo=FALSE, ct_n_contb}
+# clinton v trump contributions freq
+ct_n_contb <- ggplot(pcf_ct_agg, 
+       aes(x = cand_nm,
+           y = n_contributions,
+           fill = cand_nm)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = cand_colors)
+ct_n_contb
+```
+
+Yet despite this overwhelming advantage, Clinton actually trailed Trump if you consider only unique contributors. Trump received contributions from more than 22,159 individuals compared to 18,619 for Clinton.
+
+```{r echo=FALSE, ct_n_contbr}
+# barplot of D and R n_contributors
+ct_n_contbr <- ggplot(pcf_ct_agg, 
+       aes(x = cand_nm,
+           y = n_contributors,
+           fill = cand_nm)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = cand_colors)
+ct_n_contbr
+```
+
+We can group these three charts with a grid.
+
+```{r echo=FALSE, ct_grid}
+grid.arrange(ct_sum, ct_n_contb, ct_n_contbr, ncol = 1)
+```
+
+Given the surprising result for unique contributors, I can group the data by cand_nm and contributors to further explore this.
+
+```{r echo=FALSE, pcf_contbr}
+# group by candidate and contributors
+pcf_contbr <- pcf_ct %>%
+  group_by(cand_nm, contbr_nm) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            n_contributions = n(),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            mode_contb = Mode(contb_receipt_amt)) %>%
+  arrange(desc(sum))
+
+head(pcf_contbr)
+```
+
+The new dataframe that has aggregated multiple donations from a single person into one observation. This gives us a new way to examine the distribution of a candidate's contributions. If we want to think about the size of a "typical" contribution, it is probably better to sum the totals from a single person. If I donate \$10 fifty times, perhaps it's better to think about that person as $500. 
+
+You get some interesting results by grouping this way. You see that there are people like John Comella who made 187 contributions to Clinton totaling \$1018.50, for a mean donation of just $5.45. The most frequent Trump donor gave only 29 times. 
+
+```{r echo=FALSE, ct_unique_summary}
+# summary of unique Clinton vs Trump contributors
+by(pcf_contbr$sum, pcf_contbr$cand_nm, summary)
+```
+
+```{r include=FALSE}
+# same as above with dplyr
+pcf_contbr %>%
+  group_by(cand_nm) %>%
+  summarise(mean = mean(sum),
+            median = median(sum))
+```
+
+Before aggregating by individuals, the Clinton median was \$25. Now it's $295. 
+Before aggregating by individuals, the Trump median was \$40. Now it's gone up only to $44. 
+
+```{r echo=FALSE, ct_unique_med_mean}
+pcf_contbr %>%
+  group_by(cand_nm) %>%
+  summarise(median = median(n_contributions),
+            mean = mean(n_contributions))
+```
+
+The median Clinton contributor donates 3 times; Trump just once.
+The mean Clinton contributor donates over 6 times; the Trump contributor just 1.3 times.
+
+We can try to visualize the distribution by returning to box plots, density plots, and histograms.
+
+```{r echo=FALSE, ct_unique_box}
+# boxplot of Clinton v Trump unique contributors
+ggplot(pcf_contbr, aes(x = cand_nm, y = sum)) + geom_boxplot()
+```
+
+```{r echo=FALSE, ct_unique_95_box}
+# boxplot of Clinton v Trump unique contributors: 95%
+ggplot(pcf_contbr, aes(x = cand_nm, y = sum)) + 
+  geom_boxplot() +
+  ylim(0, quantile(pcf_contbr$sum, 0.95))
+```
+
+```{r echo=FALSE, ct_unique_95_box_h}
+# horizontal boxplot of Clinton v Trump unique contributors: 95%
+ggplot(pcf_contbr, aes(x = cand_nm, y = sum)) +
+  geom_boxplot() +
+  ylim(0, quantile(pcf_contbr$sum, 0.95)) +
+  coord_flip()
+```
+
+Our earlier result is essentially reversed. Clinton donors, although doing so more often in smaller amounts, tend to make larger donations in aggregate.
+
+We can also see this in a histogram.
+
+```{r echo=FALSE, ct_unique_hist}
+ggplot(pcf_contbr, aes(x = sum, fill = cand_nm)) + 
+  geom_histogram(position = "dodge") +
+  scale_fill_manual(values = cand_colors)
+```
+
+And on removing the top 5% and adjusting binwidth to 10:
+
+```{r echo=FALSE, ct_unique_hist2}
+ggplot(pcf_contbr, aes(x = sum, fill = cand_nm)) + 
+  geom_histogram(position = "dodge", binwidth = 10) +
+  xlim(0, quantile(pcf_contbr$sum, 0.95)) +
+  scale_fill_manual(values = cand_colors)
+```
+
+The previous histogram showed that Clinton had more support among those making small donations. That result is reversed if we aggregate by individuals. Trump contributors are more likely to have made small donations. The density plot shows this again.
+
+```{r echo=FALSE, ct_unique_density}
+# Create overlaid density plots for same data
+ggplot(pcf_contbr, aes(x = sum, fill = cand_nm)) +
+  geom_density(alpha = .3) +
+  coord_cartesian(xlim = c(0, quantile(pcf_contbr$sum, 0.95))) +
+  scale_fill_manual(values = cand_colors)
+```
+
+In the multivariate section, we can return to this and go further by adding election_tp as a fill.
+
+## Investigating primary battles
+
+With a good picture of the presidential contest, let's look at the data for each primary after creating the appropriate subsets.
+
+```{r dp_rp_subsets, include=FALSE}
+# subset for Democratic primary
+pcf_dp <- droplevels(subset(pcf8, pcf8$election_tp == "P2016" &
+                pcf8$party == "D"))
+unique(pcf_dp$cand_nm)
+
+# subset for Republican primary
+pcf_rp <- droplevels(subset(pcf8, pcf8$election_tp == "P2016" &
+                pcf8$party == "R"))
+unique(pcf_rp$cand_nm)
+```
+
+In the Republican primary, Trump did receive the most in contributions, but it was a close affair with several seemingly viable candidates, financially-speaking.
+
+```{r rp_cand_bar, echo=FALSE}
+# bar chart of Republican primary contributions
+ggplot(pcf_rp, aes(x = cand_nm, 
+                 y = contb_receipt_amt)) +
+    geom_bar(stat = "identity") +
+    scale_y_continuous(labels = comma) + 
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+Not surprisingly, Clinton dominated all other Democrats in the primary in terms of fundraising. Neither result is surprising given our look at the entire dataset.
+
+```{r dp_cand_bar, echo=FALSE}
+# bar chart of Democratic primary contributions
+ggplot(pcf_dp, aes(x = cand_nm, 
+                 y = contb_receipt_amt)) +
+    geom_bar(stat = "identity") +
+    scale_y_continuous(labels = comma) + 
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+## Investigating contb_receipt_amt by zip_code
+
+We saw that the frequency of contributions varies widely by zip code. Here we can group by zip code and see how it affects `contb_receipt_amt`.
+
+```{r echo=FALSE, pcf_zip}
+# summary table grouped by zip
+pcf_zip <- (pcf8 %>%
+  group_by(contbr_zip5) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            p_sum = sum / sum(pcf8$contb_receipt_amt),
+            n_contributions = n(),
+            p_contributions = n_contributions / nrow(pcf8),
+            n_contributors = n_distinct(contbr_nm),
+            p_contributors = n_contributors /           
+              length(unique(pcf8$contbr_nm)),
+            min_contb = min(contb_receipt_amt),
+            '25%_contb' = quantile(contb_receipt_amt, probs = 0.25),
+            med_contb = median(contb_receipt_amt),
+            mean_contb = mean(contb_receipt_amt),
+            '75%_contb' = quantile(contb_receipt_amt, probs = 0.75),
+            max_contb = max(contb_receipt_amt),
+            sd_contb = sd(contb_receipt_amt),
+            iqr_contb = IQR(contb_receipt_amt),
+            range_contb = max_contb - min_contb,
+            mode_contb = Mode(contb_receipt_amt)) %>%
+            mutate(rank_sum = rank(sum),
+                   rank_contributors = rank(n_contributors),
+                   rank_contributions = rank(n_contributions)) %>%
+  arrange(desc(sum)))
+```
+
+We see the top zip code 19103 (downtown Philadelphia) contributed nearly 3x the next generous zip code. These totals are still highly dispersed. 19103 is less than 4% of all contributions. We would need to aggregate zip codes into larger geographical units in order to get a better view (1631 factors is too many pieces). But you can definitely see an important disparity. If looking to raise funds, I'd spend my time as a candidate in 19103!
+
+```{r echo=FALSE, summary_zip}
+# summary for top zip codes
+require(MASS)
+require(dplyr)
+top_zips <- pcf_zip %>%
+  dplyr::select(contbr_zip5, sum, p_sum, n_contributions, n_contributors)
+
+head(top_zips, 10)
+```
+
+# Bivariate Analysis
+
+Key Summary:
+
+Democratic candidates received \$15.6m compared to $9.6m received by their Republican competitiors. However, the story is more easily understood by looking at the individual candidates, Clinton and Trump, who received the lionshare of their party's totals.
+
+Out of \$25.32m contributed in PA in the 2016 primary and general elections, Hillary Clinton received $12.97m, slightly more than 50% of the total contributions.
+
+Similarly, in terms of the frequency of contributors, Clinton received over 118,000 of the 238,989 donations valid for consideration. Again, this is nearly half of all valid PA contributions attributed to Clinton.
+
+What's interesting is if you look at the number of unique contributors. Despite receiving just \$4.15m in contributions, close to $9m less than Clinton, Donald Trump actually had more unique donors. Trump had 22,159 unique donors compared to 18,619 for Clinton.
+
+Determining the distribution of Clinton and Trump contributions is heavily influenced by whether you group by unique contributors. Without doing so, it appears that Clinton contributions tend to come in smaller amounts than Trump contributions. However, Clinton contributors tend to donate repeatedly more so than Trump contributors. When grouping to consider one individual as an observation, we can see that Clinton contributors actually tend to donate in larger amounts.
+
+The median Clinton contribution was \$25; the median Trump contribution was $40.
+However when grouping by individual contributors, the median Clinton contribution becomes \$295; the median Trump contributions goes only to $44.
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+Analysis by party and candidate not surprisingly has similar results because party is only an aggregation of candidates. Clinton overwhelmingly dominated Democratic fundraising whereas the Republican distribution was more competitive.
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+
+Zip code data was interesting but more work would be needed to aggregate zip codes into districts or counties. The most interesting result came from grouping by unique contributors.
+
+### What was the strongest relationship you found?
+
+As there is only one numeric variable, I'm unable to conduct correlation tests to determine what relationships are strongest in a statistical sense. 
+
+# Multivariate Plots
+
+## Investigating contb_receipt_amt by contb_receipt_dt, cand_nm, and election_tp
+
+Comparing barplots of Trump and Clinton is important to understand the magnitude of the funding difference between the candidates. But we can also compare their contributions received over the course of the campaign by adding date and election_tp to our plot.
+
+```{r echo=FALSE, ct_campaign1}
+# scatterplot of Clinton vs Trump over time
+ggplot(pcf_ct, aes(x = contb_receipt_dt,
+                   y = contb_receipt_amt,
+                   color = cand_nm)) +
+  geom_point(alpha = 1/5, size = 0.5)
+```
+
+Even with a low alpha setting, there's too much overplotting to understand what's happening here. As we know the distribution and aggregate totals, I'll remove the top 5% of contributions.
+
+```{r echo=FALSE, ct_campaign2}
+# scatterplot of Clinton vs Trump over time
+ggplot(pcf_ct, aes(x = contb_receipt_dt,
+                   y = contb_receipt_amt,
+                   color = cand_nm)) +
+  geom_point(alpha = 1/5, size = 0.5) +
+  ylim(0, quantile(pcf_ct$contb_receipt_amt, 0.95))
+```
+
+That takes us from a ymax of 5000 to 400 so we get a much better picture excluding the top 5%. Still, faceting by cand_nm should give a better picture. We can also color by election_tp.
+
+```{r echo=FALSE, ct_campaign3}
+# scatterplot of Clinton vs Trump faceted by cand_nm, colored by election_tp
+ggplot(pcf_ct, aes(x = contb_receipt_dt,
+                   y = contb_receipt_amt,
+                   color = election_tp)) +
+  geom_point(alpha = 1/5, size = 0.5) +
+  ylim(0, quantile(pcf_ct$contb_receipt_amt, 0.95)) +
+  facet_grid(~ cand_nm)
+```
+
+Since the objective was to compare over time, let's facet by row instead of column.
+
+```{r echo=FALSE, ct_campaign4}
+# scatterplot of Clinton vs Trump faceted by cand_nm, colored by election_tp
+ggplot(pcf_ct, aes(x = contb_receipt_dt,
+                   y = contb_receipt_amt,
+                   color = election_tp)) +
+  geom_point(alpha = 1/5, size = 0.5) +
+  ylim(0, quantile(pcf_ct$contb_receipt_amt, 0.95)) +
+  facet_grid(cand_nm ~ .)
+```
+
+Already we can see clear differences. We know that in aggregate Clinton received far more in contributions. This plot though shows how it was acquired over time. You can see how Clinton's campaign was much stronger in the beginning of the campaign and ultimately more abundant at every point in time.  
+
+It looks like Trump had much fewer smaller donations than Clinton at the end of the general election, but this hides the fact that individuals can donate multiple times as we saw in the above section.
+
+Taking this along with the barplots gives us a good understanding of the fundraising results of the top two candidates.
+
+# Investigating contb_receipt_amt by cand_nm, and election_tp
+
+We can return to our comparative bar plots but add `election_tp` to see how that affects our results.
+
+```{r echo=FALSE, order_election_tp}
+# make election_tp an ordered factor
+pcf_ct$election_tp <- droplevels(factor(pcf_ct$election_tp, levels = c("P2016", "G2016"), ordered = TRUE))
+```
+
+```{r echo=FALSE, pcf_election_tp}
+# data grouped by cand_nm and election_tp
+pcf_election_tp <- pcf_ct %>%
+  group_by(cand_nm, election_tp) %>%
+  summarise(sum = sum(contb_receipt_amt),
+            n_contributions = n(),
+            n_contributors = n_distinct(contbr_nm))
+```
+
+Both candidates received more in contributions in the general election than their primary totals. Despite the shorter period, the higher stakes and urgency of the end of the campaign led to an increase in donations received.
+
+```{r echo=FALSE, ct_sum_et}
+# clinton v trump sum by election_tp
+ct_sum_et <- ggplot(pcf_election_tp, aes(x = cand_nm, y = sum, fill = election_tp)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_continuous(labels = comma)
+ct_sum_et
+```
+
+For Clinton, this increase came in a much higher frequency of contributions, but Trump actually received fewer number of contributions to his campaign despite bringing in more money in total during this period.
+
+```{r echo=FALSE, ct_n_contb_et}
+# clinton v trump contributions freq
+ct_n_contb_et <- ggplot(pcf_election_tp, aes(x = cand_nm, y = n_contributions, fill = election_tp)) +
+  geom_bar(stat = "identity", position = "dodge")
+ct_n_contb_et
+```
+
+The plot below shows that the number of unique contributors to Clinton saw a sharp increase from the primary to the general, while Trump actually had fewer unique contributors in the general than he did in the primary.
+
+```{r echo=FALSE, ct_n_contbr_et}
+# clinton v trump contributions unique contributors by election_tp
+ct_n_contbr_et <- ggplot(pcf_election_tp, aes(x = cand_nm, 
+                                              y = n_contributors, 
+                                              fill = election_tp)) +
+  geom_bar(stat = "identity", position = "dodge")
+ct_n_contbr_et 
+```
+
+To understand this result, we have to also remember the total unique contributors for each candidate. Clinton has 18,619 unique contributors to Trump's 22,159. Given these totals, it is a bit hard to discern the primary and general subtotals.
+
+However, what I think is happening is that Clinton contributors donate more often. The number of Clinton contributors in the general period is not far off her total unique contributor figure. This means that most of those who donated in her primary stage also donated in the general stage. Still it shows many new people came to support her campaign in general who did not support her in the primary.
+
+Trump's figures look very different. His number of unique contributors for the general campaign is nowhere near his number of total contributors. They are almost two separate groups of people. It seems most of the people supporting him in the primary did not contribute again in the general. These are new contributors.
+
+```{r echo=FALSE, ct_grid_unique}
+grid.arrange(ct_sum_et, ct_n_contb_et, ct_n_contbr_et, ncol = 1)
+```
+
+# Investigating contb_receipt_amt by zip code and party
+
+I have grouped the data by zip code and party after removing Green and Independent observations. I now have a breakdown of each zip code by the sum of Democratic and Republican contributions. I'm not sure how to visualize it though. The plot below certainly isn't perfect but it gives you a sense of the ratio of party contributions per zip code. Taking all zip codes to be equal on the x-axis (although they are not equal in terms of population or contributions), you can look at the color of each strip to see the party split of contributions in any given zip code. It's not entirely clear but at least many zip codes seem to be heavily Democrat or heavily Republican.
+
+```{r echo=FALSE, pcf_try}
+# data grouped by zip code and party
+pcf_try <- pcf8 %>%
+  group_by(contbr_zip5, party) %>%
+  summarise(sum = sum(contb_receipt_amt))
+# how to visualize it?
+```
+
+```{r echo=FALSE, zip_stacked}
+#stacked proportion bar chart
+ggplot(pcf_try, aes(x = contbr_zip5, y = sum, fill = party)) + 
+  geom_bar(stat = "identity", position = "fill", aes(fill = party)) +
+  scale_fill_manual(values = party_colors)
+```
+
+```{r include=FALSE}
+# data grouped by zip code and party
+#pcf_bug <- pcf8 %>%
+  #group_by(contbr_zip5) %>%
+  #summarise(total = sum(contb_receipt_amt)) %>%
+  #mutate(d_percent = d_sum / total)
+  #summarise(sum = sum(contb_receipt_amt))
+# how to visualize it?
+```
+
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+Bringing date into the analysis provided further evidence for how Clinton's fundraising was stronger than Trump's, especially in the early days of the campaign. She had strong support from the beginning which she maintained until the end.
+
+Both candidates were able to raise more money during the general period than during the primary, but for Trump it was a larger increase in proportion to his overall sum. For Clinton, her greater haul in the general stage naturally came through a greater number of contributions, but Trump actually achieved his increase in funds from a smaller number of contributions.
+
+I lastly took a quick look at zip codes by party. It seemed to point to strong polarization but further work is needed to confirm this.
+
+### Were there any interesting or surprising interactions between features?
+
+The degree to which grouping by unique individuals impacted the boxplot for Clinton was surprising. Clinton contributors donate much more often than for Trump.
+
+# Final Plots and Summary
+
+### Plot One
+
+```{r echo=FALSE, Plot_One}
+legend_title <- "Party"
+
+# barchart of contb_receipt_amt for all candidates
+ggplot(pcf8, aes(x = reorder(cand_nm, contb_receipt_amt, function(x){ sum(x) }), 
+                 y = contb_receipt_amt, 
+                 fill = party)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = comma, breaks = seq(0, 12500000, 2500000)) +
+  scale_fill_manual(values = party_colors, legend_title) +
+  labs(x = "", y = "Contribution Amount($)", title = "Total contributions to 2016 Presidential Candidates (PA)", caption = "Source: FEC") +
+  coord_flip()
+```
+
+### Description One
+
+Plot One is simple but necessary. Ultimately the most important thing to find in this dataset was the amount of money each candidate received. This plot shows Clinton's overwhelming advantage compared to other candidates. Filling by party allows you to see that the competition between Republican candidates was greater, with a few receiving similar amounts. The Democratic race, in terms of contributions, only had two viable candidates.
+
+### Plot Two
+
+```{r nom_dates, echo=FALSE}
+# data frame to feed nomination dates
+noms <- data.frame(cand_nm = levels(pcf_ct$cand_nm), nom_dates = c(as.Date("2016-06-07"), as.Date("2016-07-20")))
+
+# rename election_tp variable
+pcf_ct$Stage <- pcf_ct$election_tp
+```
+
+```{r echo=FALSE, Plot_Two}
+# scatterplot of Clinton vs Trump faceted by cand_nm, colored by election_tp
+ggplot(pcf_ct, aes(x = contb_receipt_dt,
+                   y = contb_receipt_amt)) +
+  geom_point(alpha = 1/4, size = 0.1) +
+  ylim(0, quantile(pcf_ct$contb_receipt_amt, 0.95)) +
+  facet_grid(cand_nm ~ .) +
+  scale_x_date(breaks = seq(as.Date("2015-04-01"), as.Date("2016-12-01"), by = "1 month"), 
+               labels = date_format("%Y-%m")) +
+  geom_vline(aes(xintercept = as.numeric(nom_dates)), 
+             data = noms, linetype = 2, color = "red") +
+  theme(axis.text.x = element_text(angle = 90),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  labs(x = "Date Contribution Received", y = "Contribution Amount($)", title = "Clinton & Trump 2016 Campaign Contributions (PA)", subtitle = "(top 5% values removed; red line depicts date party nomination secured)", caption = "Source: FEC")
+```
+
+
+### Description Two
+
+Having shown the entire field, I wanted to focus on the two presidential candidates. I think this plot does well to demonstrate the difference in contributions received over time. The previous bar chart demonstrates the magnitude of Clinton's advantage but plotting over time shows the length of the primary campaign and how Clinton's support was consistent throughout.
+
+I kept both plots black because giving a different color (e.g. red and blue) I think would have just served as a distraction. I removed election_tp as a fill variable (present in the multivariable section) and instead replaced it with a vertical red line marking the date the nomination was secured. I think this is more relevant. Faceting by row (stacking vertically) seems a better choice than horizontal if the purpose is to compare over time. I also needed to remove the top 5% of values otherwise you have a ymax of 5000. Having a ymax of only 400 shows a clearer picture, such as the lack of small donations to Trump in the general election. 
+
+### Plot Three
+
+```{r include=FALSE, b1}
+# box 1
+b1 <- ggplot(pcf_ct, aes(x = cand_nm, y = contb_receipt_amt)) +
+  geom_boxplot() +
+  ylim(0, 800) +
+  coord_flip() +
+  theme(axis.title.x = element_blank()) +
+  xlab("One Contribution, One Observation") +
+  theme(axis.title.y = element_text(size = 8, face = "italic"))
+b1
+```
+
+```{r include=FALSE, b2}
+# box 2
+b2 <- ggplot(pcf_contbr, aes(x = cand_nm, y = sum)) +
+  geom_boxplot() +
+  ylim(0, 800) +
+  coord_flip() +
+  ylab("Contribution Amount ($)") +
+  xlab("One Individual, One Observation") +
+  theme(axis.title.y = element_text(size = 8, face = "italic"))
+b2
+```
+
+```{r echo=FALSE, Plot_Three}
+# plot 3
+title1 <- textGrob("Distribution of Clinton and Trump Contributions", 
+                   gp = gpar(fontface = "bold",
+                           fontsize = 15))
+grid.arrange(b1, b2, ncol = 1, top = title1, bottom = "Source: FEC")
+```
+
+### Description Three
+
+Here I've plotted two sets of boxplots for Clinton and Trump. The top set counts each contribution as an observation; the bottom set groups by individual so each observation is the sum of contributions from a single individual.
+
+The top set of boxplots leaves one to think that a typical Clinton contribution is in fact smaller than one for Trump. However, if you group by individual you see that there is a huge increase for Clinton, while Trump mostly remains the same. This is the result of many Clinton supporters donating multiple times.
+
+# Reflection
+
+**Insights:**
+
+* More work could examine election data by the number of unique contributors. As we saw here, the raw total was not decisive enough for Clinton. Perhaps the number of unique people actually donating to a campaign should be seen as a more important metric for popular support or enthusiasm.
+
+**Challenges:**
+
+* One of the challenges was dealing with heavily skewed data. For most cases, my solution was to exclude the top 5% of values when it came to make a visualization. 
+
+* It also took me a while how to figure out how to analyze individual contributors. I initially grouped by contributor but I needed to group by candidate and then by contributor to get the result I wanted. It was surprising how much of an impact this had.
+
+**Future Questions:**
+
+* How does PA fit into larger national picture in 2016?
+
+* How does PA 2016 compare to its performance in 2012, 2008 etc? What's the trend in PA?
+
+* To what extent, if any, does the story presented here change when also considering super PAC contributions for each candidate?
+
+* More work could be done to use zip code for a geographic analysis.
