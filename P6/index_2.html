@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+  <div id="chartContainer">
+    <script src="http://d3js.org/d3.v4.min.js"></script>
+    <script src="http://dimplejs.org/dist/dimple.v2.3.0.min.js"></script>
+    <script type="text/javascript">
+      var svg = dimple.newSvg("#chartContainer", 650, 400);
+      d3.csv("titanicData1.csv", function (data) {
+        var myChart = new dimple.chart(svg, data);
+        myChart.setBounds(60, 50, 510, 305);
+        var x = myChart.addCategoryAxis("x", ["Sex", "Pclass"]);
+        x.title = "Sex (M/F) and Passenger Class (1/2/3)";
+        var y = myChart.addPctAxis("y", "Pclass");
+        y.title = "Survival Rate";
+        myChart.addSeries("Survived", dimple.plot.bar);
+        myChart.addLegend(200, 25, 185, 20, "right");
+
+        // add animation
+        myChart.ease = "quad";
+        myChart.staggerDraw = true;
+
+        myChart.draw(2000);
+
+        // Add a title with d3
+        svg.append("text")
+           .attr("x", myChart._xPixels() + myChart._widthPixels() / 2)
+           .attr("y", myChart._yPixels() - 35)
+           .style("text-anchor", "middle")
+           .style("font-family", "sans-serif")
+           .style("font-weight", "bold")
+           .text("Titanic Survival Rates by Passenger Class and Sex")
+      });
+    </script>
+  </div>
+</html>
